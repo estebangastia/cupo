@@ -2,7 +2,9 @@
 
 **Usage limits, feature gates, and metering for AI products. Drop-in for FastAPI and Next.js.**
 
-> ⚠️ **Status: design phase / request for comments.** This README describes the API we intend to build. We're validating the design before writing the code — if this would (or wouldn't) solve a problem for you, please open an issue or comment. Brutal honesty welcome.
+> **Status: design RFC — no code yet.**
+> This README specifies the API I'm about to build. Nothing described below is implemented; `src/cupo` is a placeholder and v0.1 is in progress (see [Roadmap](#roadmap)).
+> I'm publishing the design before the code so the interface gets torn apart while it's still cheap to change. If this would — or wouldn't — solve a problem you have, open an issue. Blunt feedback is the point.
 
 ---
 
@@ -20,9 +22,11 @@ So every AI SaaS ends up hand-rolling the same thing:
 - A cron job that resets counters monthly (usually in the wrong timezone)
 - No warning to the customer before they hit the wall
 
-Cupo is that layer, done once, done right, and open source.
+Cupo is meant to be that layer, built once, in the open.
 
-## What it looks like
+## What it will look like
+
+*The snippets below are the target API, not working code.*
 
 ```python
 from cupo import Cupo
@@ -63,12 +67,12 @@ features:
 
 plans:
   free:
-    ai_chat:    { limit: 50,     window: month }
+    ai_chat:    { limit: 50,      window: month }
     ai_tokens:  { limit: 100_000, window: month }
     pdf_export: false
 
   pro:
-    ai_chat:    { limit: 5_000,  window: month, on_limit: degrade }  # block | degrade | bill
+    ai_chat:    { limit: 5_000,      window: month, on_limit: degrade }  # block | degrade | bill
     ai_tokens:  { limit: 10_000_000, window: month }
     pdf_export: true
 
@@ -86,7 +90,7 @@ plans:
 
 ## Token-aware AI helpers
 
-The part everyone gets wrong. Cupo ships thin wrappers around the Anthropic and OpenAI clients that meter tokens automatically — **including streaming**, where usage is only known when the stream ends:
+The part everyone gets wrong. Cupo will ship thin wrappers around the Anthropic and OpenAI clients that meter tokens automatically — **including streaming**, where usage is only known when the stream ends:
 
 ```python
 from cupo.anthropic import metered
@@ -108,25 +112,25 @@ your app ──▶ Cupo SDK ──▶ counters (your Postgres, or Redis, or Cupo
                 └─ async usage flush (batched, idempotent)
 ```
 
-Three problems Cupo solves so you don't have to:
+Three problems Cupo is designed to solve so you don't have to:
 
-1. **Atomicity.** Two concurrent requests with one credit left: exactly one passes. Counters use atomic operations (`INCR` / row-level locks), never read-modify-write.
-2. **Latency.** Entitlements are cached in-process and synced in the background. A `check()` is a dictionary lookup, not a network call. Trade-off: near the limit, a small overshoot is possible — this is configurable (`strict: true` forces a synchronous check for expensive features).
+1. **Atomicity.** Two concurrent requests with one credit left: exactly one passes. Counters mutate through a single atomic operation (`INSERT ... ON CONFLICT DO UPDATE` on Postgres, `INCR` on Redis) — never read-modify-write.
+2. **Latency.** Entitlements are cached in-process and synced in the background, so a `check()` is a dictionary lookup rather than a network call. Trade-off: near the limit, a small overshoot is possible — configurable, with `strict: true` forcing a synchronous check for expensive features.
 3. **Idempotency.** Every `track()` takes an idempotency key. Retries, at-least-once queues, and network flakiness never double-count.
 
 **Failure mode is yours to choose:** `fail_open` (if Cupo is unreachable, allow the request — default, your product stays up) or `fail_closed` (deny — for features where overshoot costs you real money).
 
 ## Deployment modes
 
-| Mode | What it needs | For |
-|---|---|---|
-| **Embedded** | Your existing Postgres (Supabase works) | Solo devs, single service |
-| **Server** | Docker container + Redis | Multiple services / languages |
-| **Cloud** (planned) | Nothing — hosted | Teams that want dashboards, analytics, SLA |
+| Mode           | What it needs                           | For                                        | Lands in |
+| -------------- | --------------------------------------- | ------------------------------------------ | -------- |
+| **Embedded**   | Your existing Postgres (Supabase works) | Solo devs, single service                  | v0.1     |
+| **Server**     | Docker container + Redis                | Multiple services / languages              | v0.2     |
+| **Cloud**      | Nothing — hosted                        | Teams that want dashboards, analytics, SLA | v0.3     |
 
 ## Webhooks
 
-The server emits events so you can warn customers *before* they hit the wall:
+The server (v0.2) will emit events so you can warn customers *before* they hit the wall:
 
 - `usage.threshold` — configurable (e.g. at 80% of any limit)
 - `usage.limit_reached`
@@ -135,23 +139,25 @@ The server emits events so you can warn customers *before* they hit the wall:
 ## What Cupo is not
 
 - **Not a billing platform.** It doesn't generate invoices or charge cards. It pairs with Stripe, Mercado Pago, Lago, or whatever you already use (plan sync integrations are on the roadmap).
-- **Not an API gateway.** It runs inside your app, not in front of it.
+- **Not an API gateway.** It runs inside your app, not in front of it. If you want per-team spend caps on outbound LLM traffic, you want LiteLLM or Portkey — different layer, and they compose fine with this one.
 - **Not for enterprise contract management.** If you have negotiated multi-year commits with drawdowns, you want Metronome or Orb.
 
 ## FAQ
 
 **vs. Lago / Metronome / Orb?** Those meter usage to *bill* it. Cupo meters usage to *enforce* it, in the request path, in real time. Different layer — Cupo can feed them.
 
-**vs. Stigg?** Closest neighbor. Stigg is a hosted, dashboard-first entitlements platform aimed at teams. Cupo is open source, config-as-code, and designed so a solo developer is enforcing limits 15 minutes after `pip install cupo`.
+**vs. LiteLLM / Portkey / Helicone?** Those are gateways: they sit in front of your model providers and cap what *your* infrastructure spends, per key or per team. Cupo sits inside your app and answers a different question — what *your customer* is entitled to under the plan they pay for. Most products end up wanting both.
 
-**vs. rolling my own?** You can. Most people's version has the concurrency bug, misses streaming tokens, and has no idempotency. Ours has tests for all three.
+**vs. Stigg?** Closest neighbour. Stigg is a hosted, dashboard-first entitlements platform aimed at teams. Cupo is open source, config-as-code, and designed so a solo developer is enforcing limits 15 minutes after `pip install cupo`.
 
-**Why should I trust the counters?** Every counter mutation is an atomic operation with tests that hammer it concurrently. The test suite is part of the pitch — read it.
+**vs. rolling my own?** You can, and plenty do. The hand-rolled versions I've run into share three bugs: a read-modify-write counter that breaks under concurrency, streaming responses that never get metered, and no idempotency on retries. Getting those three right is the entire reason this project exists.
+
+**Why should I trust the counters?** Right now you shouldn't — there's nothing to trust yet. When v0.1 lands it ships with a concurrency test suite that hammers every counter path, and the intent is that you judge the project on that suite rather than on this paragraph. If it isn't convincing, say so in an issue.
 
 ## Roadmap
 
-- [ ] **v0.1** — Python SDK, embedded mode (Postgres), plans-as-code, FastAPI middleware, Anthropic/OpenAI metered wrappers, docs + 3 runnable examples
-- [ ] **v0.2** — Standalone server (Docker), TypeScript SDK, webhooks, Redis counters
+- [ ] **v0.1** *(in progress)* — Python SDK, embedded mode (Postgres), atomic counters, idempotent `track()`, Anthropic/OpenAI metered wrappers incl. streaming, concurrency test suite, one runnable FastAPI example
+- [ ] **v0.2** — Plans-as-code YAML engine, standalone server (Docker), TypeScript SDK, webhooks, Redis counters
 - [ ] **v0.3** — Stripe & Mercado Pago plan sync, usage dashboard, hosted cloud (free tier + flat self-serve pricing — no "talk to sales")
 
 ## License
@@ -160,4 +166,4 @@ SDKs: MIT. Server: AGPL-3.0. Self-hosting is free forever; the hosted cloud is h
 
 ---
 
-**Would you use this?** Open an issue titled `feedback:` and tell us — especially if the answer is no and why. If you've hand-rolled this layer before, we'd love 20 minutes of your war stories.
+**Would you use this?** Open an issue titled `feedback:` and tell me — especially if the answer is no and why. If you've hand-rolled this layer before, I'd love 20 minutes of your war stories.
