@@ -9,3 +9,9 @@ build/
 .env
 .coverage
 htmlcov/
+
+# credentials
+Api_key/
+*.token
+.pypirc
+secrets/
