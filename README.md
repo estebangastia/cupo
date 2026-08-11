@@ -1,10 +1,10 @@
 # Cupo
 
-**Usage limits, feature gates, and metering for AI products. Drop-in for FastAPI and Next.js.**
+**Usage limits, feature gates, and metering for AI products. Python, open source.**
 
-> **Status: design RFC — no code yet.**
-> This README specifies the API I'm about to build. Nothing described below is implemented; `src/cupo` is a placeholder and v0.1 is in progress (see [Roadmap](#roadmap)).
-> I'm publishing the design before the code so the interface gets torn apart while it's still cheap to change. If this would — or wouldn't — solve a problem you have, open an issue. Blunt feedback is the point.
+> **Status: v0.1 — embedded mode works, API not yet stable.**
+> Entitlement checks, idempotent usage tracking and token metering run against Postgres today, covered by 32 tests. Plans-as-code (YAML), the standalone server and the TypeScript SDK are not built yet — see [Roadmap](#roadmap).
+> Names and signatures may still change before 1.0. If something here is wrong for your use case, that's worth an issue while changing it is still cheap.
 
 ---
 
@@ -22,11 +22,34 @@ So every AI SaaS ends up hand-rolling the same thing:
 - A cron job that resets counters monthly (usually in the wrong timezone)
 - No warning to the customer before they hit the wall
 
-Cupo is meant to be that layer, built once, in the open.
+Cupo is that layer, built once, in the open.
 
-## What it will look like
+## Quickstart
 
-*The snippets below are the target API, not working code.*
+```bash
+pip install cupo        # not on PyPI yet: pip install git+https://github.com/estebangastia/cupo
+```
+
+```python
+from cupo import Cupo
+
+cupo = Cupo(
+    dsn="postgresql://...",          # your existing database
+    plans={
+        "free": {"ai_chat": {"limit": 50, "window": "month"}},
+        "pro":  {"ai_chat": {"limit": 5_000, "window": "month"}},
+    },
+)
+await cupo.connect()                 # creates two tables, idempotent
+
+res = await cupo.check("cust_123", "ai_chat", plan="free")
+if not res.allowed:
+    raise HTTPException(429, {"resets_at": res.resets_at})
+```
+
+A runnable FastAPI app is in [`examples/fastapi_basic.py`](examples/fastapi_basic.py).
+
+## How it works
 
 ```python
 from cupo import Cupo
@@ -54,9 +77,9 @@ cupo.track(customer.id, feature="ai_chat",
            idempotency_key=req.id)          # safe to retry, never double-counts
 ```
 
-## Plans as code
+## Plans as code *(v0.2)*
 
-Plans live in a versioned YAML file in your repo — reviewable in a PR, not hidden in a dashboard:
+Today plans are passed as a dict. In v0.2 they will live in a versioned YAML file in your repo — reviewable in a PR, not hidden in a dashboard:
 
 ```yaml
 # cupo.yaml
@@ -90,7 +113,7 @@ plans:
 
 ## Token-aware AI helpers
 
-The part everyone gets wrong. Cupo will ship thin wrappers around the Anthropic and OpenAI clients that meter tokens automatically — **including streaming**, where usage is only known when the stream ends:
+The part everyone gets wrong. Cupo ships thin wrappers around the Anthropic and OpenAI clients that meter tokens automatically — **including streaming**, where usage is only known when the stream ends:
 
 ```python
 from cupo.anthropic import metered
@@ -103,7 +126,7 @@ with client.messages.stream(model="claude-sonnet-4-6", ...) as stream:
         yield text
 ```
 
-## How it works
+## Architecture
 
 ```
 your app ──▶ Cupo SDK ──▶ counters (your Postgres, or Redis, or Cupo server)
@@ -112,10 +135,10 @@ your app ──▶ Cupo SDK ──▶ counters (your Postgres, or Redis, or Cupo
                 └─ async usage flush (batched, idempotent)
 ```
 
-Three problems Cupo is designed to solve so you don't have to:
+Three problems Cupo solves so you don't have to:
 
 1. **Atomicity.** Two concurrent requests with one credit left: exactly one passes. Counters mutate through a single atomic operation (`INSERT ... ON CONFLICT DO UPDATE` on Postgres, `INCR` on Redis) — never read-modify-write.
-2. **Latency.** Entitlements are cached in-process and synced in the background, so a `check()` is a dictionary lookup rather than a network call. Trade-off: near the limit, a small overshoot is possible — configurable, with `strict: true` forcing a synchronous check for expensive features.
+2. **Streaming.** Token counts do not exist until a stream closes, so instrumentation that reads `usage` at call time records zero for exactly the traffic most likely to be expensive. The metered wrappers hook stream close instead.
 3. **Idempotency.** Every `track()` takes an idempotency key. Retries, at-least-once queues, and network flakiness never double-count.
 
 **Failure mode is yours to choose:** `fail_open` (if Cupo is unreachable, allow the request — default, your product stays up) or `fail_closed` (deny — for features where overshoot costs you real money).
@@ -152,11 +175,11 @@ The server (v0.2) will emit events so you can warn customers *before* they hit t
 
 **vs. rolling my own?** You can, and plenty do. The hand-rolled versions I've run into share three bugs: a read-modify-write counter that breaks under concurrency, streaming responses that never get metered, and no idempotency on retries. Getting those three right is the entire reason this project exists.
 
-**Why should I trust the counters?** Right now you shouldn't — there's nothing to trust yet. When v0.1 lands it ships with a concurrency test suite that hammers every counter path, and the intent is that you judge the project on that suite rather than on this paragraph. If it isn't convincing, say so in an issue.
+**Why should I trust the counters?** Don't take my word for it — read `tests/test_atomicity.py` and run it. It fires 200 concurrent requests at a limit of 50 and asserts that exactly 50 pass. To confirm the tests actually catch the bug rather than merely passing, I ran them against a deliberately naive read-modify-write implementation: it granted all 200 and left the stored counter at 21.
 
 ## Roadmap
 
-- [ ] **v0.1** *(in progress)* — Python SDK, embedded mode (Postgres), atomic counters, idempotent `track()`, Anthropic/OpenAI metered wrappers incl. streaming, concurrency test suite, one runnable FastAPI example
+- [x] **v0.1** — Python SDK, embedded mode (Postgres), atomic counters, idempotent `track()`, Anthropic/OpenAI metered wrappers incl. streaming, 32-test suite, runnable FastAPI example
 - [ ] **v0.2** — Plans-as-code YAML engine, standalone server (Docker), TypeScript SDK, webhooks, Redis counters
 - [ ] **v0.3** — Stripe & Mercado Pago plan sync, usage dashboard, hosted cloud (free tier + flat self-serve pricing — no "talk to sales")
 
@@ -167,3 +190,5 @@ SDKs: MIT. Server: AGPL-3.0. Self-hosting is free forever; the hosted cloud is h
 ---
 
 **Would you use this?** Open an issue titled `feedback:` and tell me — especially if the answer is no and why. If you've hand-rolled this layer before, I'd love 20 minutes of your war stories.
+
+**Running the tests:** see [CONTRIBUTING.md](CONTRIBUTING.md). They need a real Postgres; concurrency guarantees can't be verified against a mock.
