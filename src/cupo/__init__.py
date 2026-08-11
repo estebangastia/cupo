@@ -5,7 +5,7 @@ from .plans import CheckResult, Entitlement, PlanError, Plans
 from .store import PostgresStore
 from .windows import InvalidWindow, window_end, window_start
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0rc1"
 
 __all__ = [
     "Cupo",
