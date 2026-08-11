@@ -4,28 +4,34 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cupo"
-version = "0.0.1"
-description = "Usage limits, feature gates, and metering for AI products. Drop-in for FastAPI and Next.js."
+version = "0.1.0.dev0"
+description = "Usage limits, feature gates and metering for AI products"
 readme = "README.md"
-license = { text = "MIT" }
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [{ name = "Esteban Gastiazoro" }]
-keywords = ["entitlements", "metering", "usage-limits", "rate-limiting", "billing", "ai", "llm", "fastapi", "saas"]
+keywords = ["entitlements", "usage-metering", "rate-limiting", "llm", "saas", "billing"]
 classifiers = [
-  "Development Status :: 1 - Planning",
-  "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Topic :: Software Development :: Libraries",
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
 ]
+dependencies = ["asyncpg>=0.29"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.urls]
 Homepage = "https://github.com/estebangastia/cupo"
-Repository = "https://github.com/estebangastia/cupo"
 Issues = "https://github.com/estebangastia/cupo/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cupo"]
+
+[tool.hatch.build]
+include = ["src/cupo/**/*.py", "src/cupo/schema.sql"]

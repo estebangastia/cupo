@@ -1,25 +1,11 @@
-# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
-build/
+.pytest_cache/
 .venv/
 venv/
-.python-version
-
-# Env & secrets
+dist/
+build/
+*.egg-info/
 .env
-.env.*
-
-# Tooling
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
 .coverage
 htmlcov/
-
-# Editors / OS
-.vscode/
-.idea/
-.DS_Store

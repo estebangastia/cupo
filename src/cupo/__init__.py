@@ -1,26 +1,20 @@
-"""Cupo — usage limits, feature gates, and metering for AI products.
+"""Cupo -- usage limits, feature gates and metering for AI products."""
 
-This is a name-reservation release. The project is in design phase:
-the full API specification is public and open for feedback at
+from .client import Cupo
+from .plans import CheckResult, Entitlement, PlanError, Plans
+from .store import PostgresStore
+from .windows import InvalidWindow, window_end, window_start
 
-    https://github.com/estebangastia/cupo
+__version__ = "0.1.0.dev0"
 
-v0.1 (Python SDK, embedded mode, plans-as-code, FastAPI middleware,
-token-aware Anthropic/OpenAI wrappers) is in development.
-"""
-
-__version__ = "0.0.1"
-
-
-def _not_yet(*_args, **_kwargs):
-    raise NotImplementedError(
-        "Cupo is in design phase. Follow progress and leave feedback at "
-        "https://github.com/estebangastia/cupo"
-    )
-
-
-class Cupo:
-    """Placeholder for the Cupo client. See module docstring."""
-
-    def __init__(self, *args, **kwargs):
-        _not_yet()
+__all__ = [
+    "Cupo",
+    "CheckResult",
+    "Entitlement",
+    "PlanError",
+    "Plans",
+    "PostgresStore",
+    "InvalidWindow",
+    "window_start",
+    "window_end",
+]
