@@ -1,5 +1,10 @@
 # Cupo
 
+[![tests](https://github.com/estebangastia/cupo/actions/workflows/tests.yml/badge.svg)](https://github.com/estebangastia/cupo/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/cupo?include_prereleases)](https://pypi.org/project/cupo/)
+[![Python](https://img.shields.io/pypi/pyversions/cupo)](https://pypi.org/project/cupo/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **Usage limits, feature gates, and metering for AI products. Python, open source.**
 
 > **Status: v0.1 — embedded mode works, API not yet stable.**
@@ -175,7 +180,9 @@ The server (v0.2) will emit events so you can warn customers *before* they hit t
 
 **vs. rolling my own?** You can, and plenty do. The hand-rolled versions I've run into share three bugs: a read-modify-write counter that breaks under concurrency, streaming responses that never get metered, and no idempotency on retries. Getting those three right is the entire reason this project exists.
 
-**Why should I trust the counters?** Don't take my word for it — read `tests/test_atomicity.py` and run it. It fires 200 concurrent requests at a limit of 50 and asserts that exactly 50 pass. To confirm the tests actually catch the bug rather than merely passing, I ran them against a deliberately naive read-modify-write implementation: it granted all 200 and left the stored counter at 21.
+**Why should I trust the counters?** Don't take my word for it — read `tests/test_atomicity.py` and run it. It fires 200 concurrent requests at a limit of 50 and asserts that exactly 50 pass.
+
+A passing test proves less than people assume, so CI also runs a mutation job: it patches the atomic statement into the naive read-modify-write implementation everyone writes first, and **fails the build if the tests still pass**. Against that broken version the suite catches the regression immediately — 60 requests of 3 units against a limit of 100 stored 15 units instead of 180, the signature of lost updates. The guarantee is checked on every push, on Python 3.10 through 3.13.
 
 ## Roadmap
 

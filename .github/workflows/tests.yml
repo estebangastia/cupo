@@ -1,0 +1,99 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor declared in pyproject; 3.13 is what most people
+        # will actually install under. Both ends are worth checking.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cupo
+          POSTGRES_PASSWORD: cupo
+          POSTGRES_DB: cupo_test
+        ports:
+          - 5433:5432
+        # Without this the first test can race the database's startup.
+        options: >-
+          --health-cmd "pg_isready -U cupo -d cupo_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        env:
+          CUPO_TEST_DSN: postgresql://cupo:cupo@localhost:5433/cupo_test
+        run: python -m pytest -v
+
+  # The concurrency guarantee is the product. This job proves the suite would
+  # catch a regression rather than merely passing: it patches the atomic
+  # statement into the naive read-modify-write everyone writes first, and fails
+  # if the tests stay green.
+  mutation:
+    runs-on: ubuntu-latest
+    needs: test
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cupo
+          POSTGRES_PASSWORD: cupo
+          POSTGRES_DB: cupo_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U cupo -d cupo_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Break the atomic counter on purpose
+        run: python .github/scripts/break_atomicity.py
+
+      - name: Assert the suite notices
+        env:
+          CUPO_TEST_DSN: postgresql://cupo:cupo@localhost:5433/cupo_test
+        run: |
+          if python -m pytest tests/test_atomicity.py -q; then
+            echo "::error::The atomicity tests passed against a deliberately broken counter."
+            echo "::error::They are not testing what they claim to test."
+            exit 1
+          else
+            echo "Tests correctly failed against the naive implementation."
+          fi
