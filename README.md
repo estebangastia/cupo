@@ -8,7 +8,7 @@
 **Usage limits, feature gates, and metering for AI products. Python, open source.**
 
 > **Status: v0.1 — embedded mode works, API not yet stable.**
-> Entitlement checks, idempotent usage tracking and token metering run against Postgres today, covered by 32 tests. Plans-as-code (YAML), the standalone server and the TypeScript SDK are not built yet — see [Roadmap](#roadmap).
+> Entitlement checks, idempotent usage tracking and token metering run against Postgres today, covered by 38 tests. Plans-as-code (YAML), the standalone server and the TypeScript SDK are not built yet — see [Roadmap](#roadmap).
 > Names and signatures may still change before 1.0. If something here is wrong for your use case, that's worth an issue while changing it is still cheap.
 
 ---
@@ -130,6 +130,11 @@ with client.messages.stream(model="claude-sonnet-4-6", ...) as stream:
     for text in stream.text_stream:
         yield text
 ```
+`examples/groq_streaming.py` runs this end to end against Groq's free tier
+(no credit card needed). It also documents a trap found by testing against a
+live provider: Groq reports stream usage under a vendor field, `x_groq.usage`,
+rather than the standard `.usage`, so instrumentation written against the
+OpenAI shape records zero for every Groq stream. Cupo checks both.
 
 ## Architecture
 
@@ -181,12 +186,12 @@ The server (v0.2) will emit events so you can warn customers *before* they hit t
 **vs. rolling my own?** You can, and plenty do. The hand-rolled versions I've run into share three bugs: a read-modify-write counter that breaks under concurrency, streaming responses that never get metered, and no idempotency on retries. Getting those three right is the entire reason this project exists.
 
 **Why should I trust the counters?** Don't take my word for it — read `tests/test_atomicity.py` and run it. It fires 200 concurrent requests at a limit of 50 and asserts that exactly 50 pass.
-
+..., 38-test suite, runnable FastAPI and Groq streaming examples
 A passing test proves less than people assume, so CI also runs a mutation job: it patches the atomic statement into the naive read-modify-write implementation everyone writes first, and **fails the build if the tests still pass**. Against that broken version the suite catches the regression immediately — 60 requests of 3 units against a limit of 100 stored 15 units instead of 180, the signature of lost updates. The guarantee is checked on every push, on Python 3.10 through 3.13.
 
 ## Roadmap
 
-- [x] **v0.1** — Python SDK, embedded mode (Postgres), atomic counters, idempotent `track()`, Anthropic/OpenAI metered wrappers incl. streaming, 32-test suite, runnable FastAPI example
+- [x] **v0.1** — Python SDK, embedded mode (Postgres), atomic counters, idempotent `track()`, Anthropic/OpenAI metered wrappers incl. streaming, 38-test suite, runnable FastAPI example
 - [ ] **v0.2** — Plans-as-code YAML engine, standalone server (Docker), TypeScript SDK, webhooks, Redis counters
 - [ ] **v0.3** — Stripe & Mercado Pago plan sync, usage dashboard, hosted cloud (free tier + flat self-serve pricing — no "talk to sales")
 
