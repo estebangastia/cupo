@@ -22,7 +22,7 @@ CUPO_TEST_DSN=postgresql://user:pass@host:5432/dbname pytest
 |---|---|
 | `tests/test_atomicity.py` | A limit is never exceeded, at any level of concurrency |
 | `tests/test_idempotency.py` | A retried `track()` counts once |
-| `tests/test_metering.py` | Streaming responses are metered when the stream closes |
+| `tests/test_metering.py` | Streaming responses are metered when the stream closes, across both the Anthropic context-manager shape and the OpenAI-compatible iterator shape (including Groq's vendor `x_groq.usage` field) |
 | `tests/test_plans.py` | Plan parsing fails at startup; windows roll over without a cron job |
 
 ## Verifying the tests actually catch the bug

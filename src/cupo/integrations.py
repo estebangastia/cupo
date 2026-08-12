@@ -60,30 +60,117 @@ class _MeteredStream:
         return result
 
 
+def _usage_object(obj: Any) -> Any:
+    """Locate the usage object on a response, whatever shape the provider used.
+
+    Anthropic puts it on `.usage`; streams expose `get_final_message()`.
+    OpenAI-compatible providers put it on `.usage` too, but only when the
+    caller passed `stream_options={"include_usage": True}`.
+
+    Groq is the interesting case: it is otherwise OpenAI-compatible, but on a
+    stream it reports usage under a vendor field, `x_groq.usage`. Code that
+    only reads `.usage` silently records zero for every Groq stream. Since
+    undercounting is the failure this module exists to prevent, the vendor
+    field is checked explicitly rather than treated as an edge case.
+    """
+    usage = getattr(obj, "usage", None)
+    if usage is not None:
+        return usage
+
+    for accessor in ("get_final_message", "get_final_response"):
+        method = getattr(obj, accessor, None)
+        if callable(method):
+            usage = getattr(method(), "usage", None)
+            if usage is not None:
+                return usage
+
+    # Groq: chunk.x_groq.usage. The SDK may expose it as an attribute or, when
+    # the field is unmodelled, inside model_extra / a plain dict.
+    x_groq = getattr(obj, "x_groq", None)
+    if x_groq is None:
+        extra = getattr(obj, "model_extra", None) or {}
+        x_groq = extra.get("x_groq") if isinstance(extra, dict) else None
+    if isinstance(x_groq, dict):
+        return x_groq.get("usage")
+    if x_groq is not None:
+        return getattr(x_groq, "usage", None)
+
+    return None
+
+
 def _extract_usage(obj: Any) -> dict[str, int] | None:
     """Pull input/output token counts off whatever the SDK returned.
 
-    Anthropic exposes `usage.input_tokens` / `usage.output_tokens`; OpenAI uses
-    `usage.prompt_tokens` / `usage.completion_tokens`. Streams expose a
-    `get_final_message()` accessor instead of the attribute directly.
+    Anthropic exposes `usage.input_tokens` / `usage.output_tokens`; OpenAI and
+    its compatible providers use `prompt_tokens` / `completion_tokens`. Both
+    attribute access and dict access are supported, because vendor fields like
+    Groq's arrive unmodelled.
     """
-    usage = getattr(obj, "usage", None)
-
-    if usage is None and hasattr(obj, "get_final_message"):
-        usage = getattr(obj.get_final_message(), "usage", None)
-    if usage is None and hasattr(obj, "get_final_response"):
-        usage = getattr(obj.get_final_response(), "usage", None)
+    usage = _usage_object(obj)
     if usage is None:
         return None
 
-    inp = getattr(usage, "input_tokens", None)
-    out = getattr(usage, "output_tokens", None)
-    if inp is None:
-        inp = getattr(usage, "prompt_tokens", 0)
-    if out is None:
-        out = getattr(usage, "completion_tokens", 0)
+    def field(*names):
+        for name in names:
+            if isinstance(usage, dict):
+                if usage.get(name) is not None:
+                    return usage[name]
+            elif getattr(usage, name, None) is not None:
+                return getattr(usage, name)
+        return None
 
-    return {"input": int(inp or 0), "output": int(out or 0), "total": int(inp or 0) + int(out or 0)}
+    inp = field("input_tokens", "prompt_tokens") or 0
+    out = field("output_tokens", "completion_tokens") or 0
+
+    return {
+        "input": int(inp),
+        "output": int(out),
+        "total": int(inp) + int(out),
+    }
+
+
+class _MeteredIterator:
+    """Wraps an async iterator of stream chunks and meters after the last one.
+
+    OpenAI-compatible providers return an async iterable rather than a context
+    manager, and the usage totals ride on the final chunk. Every chunk is
+    inspected rather than only the last, because providers disagree about which
+    chunk carries the totals -- some append an extra empty chunk after the one
+    with `finish_reason`, so "the last chunk" is not a reliable location.
+    """
+
+    def __init__(self, inner: Any, on_close, idempotency_key: str | None):
+        self._inner = inner
+        self._on_close = on_close
+        self._idempotency_key = idempotency_key
+        self._usage: dict[str, int] | None = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            chunk = await self._inner.__anext__()
+        except StopAsyncIteration:
+            if self._usage:
+                await self._on_close(self._usage, self._idempotency_key)
+                self._usage = None
+            raise
+
+        try:
+            usage = _extract_usage(chunk)
+            if usage and usage["total"]:
+                self._usage = usage
+        except Exception:
+            log.exception("cupo: could not read usage from stream chunk")
+
+        return chunk
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
 
 
 class MeteredMessages:
@@ -95,9 +182,28 @@ class MeteredMessages:
         self._count = count
 
     async def create(self, *args, cupo_idempotency_key: str | None = None, **kwargs):
+        streaming = kwargs.get("stream", False)
+
+        # Without this the provider omits usage from the stream entirely and
+        # there is nothing to meter. Callers who set it themselves are left
+        # alone.
+        if streaming and "stream_options" not in kwargs:
+            kwargs["stream_options"] = {"include_usage": True}
+
         response = self._inner.create(*args, **kwargs)
         if hasattr(response, "__await__"):
             response = await response
+
+        if streaming or hasattr(response, "__anext__"):
+            async def on_close(usage, key):
+                await self._meter(usage[self._count], key)
+
+            return _MeteredIterator(
+                response.__aiter__() if hasattr(response, "__aiter__") else response,
+                on_close,
+                cupo_idempotency_key,
+            )
+
         usage = _extract_usage(response)
         if usage:
             await self._meter(usage[self._count], cupo_idempotency_key)
@@ -127,12 +233,21 @@ class MeteredClient:
     so this is safe to drop in place of the original object.
     """
 
-    def __init__(self, inner: Any, cupo, customer_id: str, feature: str, count: str):
+    def __init__(
+        self,
+        inner: Any,
+        cupo,
+        customer_id: str,
+        feature: str,
+        count: str,
+        plan: str | None = None,
+    ):
         self._inner = inner
         self._cupo = cupo
         self._customer_id = customer_id
         self._feature = feature
         self._count = count
+        self._plan = plan
 
     async def _meter(self, units: int, idempotency_key: str | None):
         if units:
@@ -140,6 +255,7 @@ class MeteredClient:
                 self._customer_id,
                 self._feature,
                 units,
+                plan=self._plan,
                 idempotency_key=idempotency_key,
             )
 
@@ -177,11 +293,18 @@ def metered(
     customer_id: str,
     feature: str = "ai_tokens",
     count: str = "total",
+    plan: str | None = None,
 ) -> MeteredClient:
     """Wrap an Anthropic or OpenAI client so token usage lands in Cupo.
 
     `count` selects which figure is metered: "total", "input" or "output".
+
+    `plan` matters more than it looks. Counters are keyed by the window the
+    feature is defined with, so metering a feature declared `window: day`
+    without naming the plan writes into the monthly row instead -- the write
+    succeeds, no error is raised, and the daily counter silently reads zero.
+    Pass the customer's plan whenever the feature is not on a monthly window.
     """
     if count not in ("total", "input", "output"):
         raise ValueError("count must be 'total', 'input' or 'output'")
-    return MeteredClient(client, cupo, customer_id, feature, count)
+    return MeteredClient(client, cupo, customer_id, feature, count, plan)

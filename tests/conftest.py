@@ -27,6 +27,7 @@ PLANS = {
     "single": {"ai_chat": {"limit": 1, "window": "month"}},
     "hundred": {"ai_chat": {"limit": 100, "window": "month"}},
     "tokens": {"ai_tokens": {"limit": 1_000, "window": "month"}},
+    "daily_tokens": {"ai_tokens": {"limit": 1_000, "window": "day"}},
     "unlimited": {"ai_chat": {"limit": "unlimited", "window": "month"}},
     "degrading": {
         "ai_chat": {"limit": 5, "window": "month", "on_limit": "degrade"}

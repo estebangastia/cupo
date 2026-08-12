@@ -153,3 +153,182 @@ async def test_sync_stream_use_fails_loudly(cupo, customer):
     with pytest.raises(TypeError, match="async clients only"):
         with client.messages.stream(model="m", messages=[]):
             pass
+
+
+# --------------------------------------------------------------- OpenAI-style
+# Providers that follow the OpenAI wire format return an async iterator of
+# chunks rather than a context manager, and put the totals on a final chunk.
+
+
+class FakeChunk:
+    """A streaming chunk.
+
+    Note the empty `choices` when there is no content: that is what real
+    providers send on the final usage-bearing chunk, and an earlier version of
+    this fake got it wrong by always supplying one choice. The mistake only
+    surfaced against the live API, where `chunk.choices[0]` raised IndexError
+    at the end of an otherwise successful stream.
+    """
+
+    def __init__(self, content=None, usage=None, x_groq=None):
+        if content is None:
+            self.choices = []
+        else:
+            self.choices = [
+                type("C", (), {"delta": type("D", (), {"content": content})()})()
+            ]
+        self.usage = usage
+        if x_groq is not None:
+            self.x_groq = x_groq
+
+
+class FakeAsyncStream:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self._i = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._i >= len(self._chunks):
+            raise StopAsyncIteration
+        chunk = self._chunks[self._i]
+        self._i += 1
+        return chunk
+
+
+class FakeStreamingCompletions:
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        return FakeAsyncStream(self._chunks)
+
+
+class FakeOpenAICompatible:
+    def __init__(self, chunks):
+        self.completions = FakeStreamingCompletions(chunks)
+        self.chat = type("Chat", (), {"completions": self.completions})()
+
+
+async def test_openai_style_stream_is_metered(cupo, customer):
+    """Usage arrives on a trailing chunk, after the content is done."""
+    chunks = [
+        FakeChunk("he"),
+        FakeChunk("llo"),
+        FakeChunk(None, usage=FakeOpenAIUsage(30, 70)),
+    ]
+    client = metered(FakeOpenAICompatible(chunks), cupo, customer_id=customer)
+
+    text = ""
+    async for chunk in await client.chat.completions.create(model="m", messages=[], stream=True):
+        if not chunk.choices:
+            continue
+        piece = chunk.choices[0].delta.content
+        if piece:
+            text += piece
+
+    assert text == "hello"
+    assert await cupo.store.used(customer, "ai_tokens", _month()) == 100
+
+
+async def test_groq_x_groq_usage_shape_is_metered(cupo, customer):
+    """Groq reports stream usage under a vendor field, not `.usage`.
+
+    Code that only reads `.usage` records zero for every Groq stream. This is
+    the silent-undercount failure the module exists to prevent, so it gets a
+    test of its own.
+    """
+    chunks = [
+        FakeChunk("hi"),
+        FakeChunk(None, x_groq={"usage": {"prompt_tokens": 21, "completion_tokens": 42}}),
+    ]
+    client = metered(FakeOpenAICompatible(chunks), cupo, customer_id=customer)
+
+    async for _ in await client.chat.completions.create(model="m", messages=[], stream=True):
+        pass
+
+    assert await cupo.store.used(customer, "ai_tokens", _month()) == 63
+
+
+async def test_usage_on_a_non_final_chunk_is_still_caught(cupo, customer):
+    """Some providers append an empty chunk after the one carrying usage."""
+    chunks = [
+        FakeChunk("x"),
+        FakeChunk(None, usage=FakeOpenAIUsage(5, 15)),
+        FakeChunk(None),  # trailing empty chunk
+    ]
+    client = metered(FakeOpenAICompatible(chunks), cupo, customer_id=customer)
+
+    async for _ in await client.chat.completions.create(model="m", messages=[], stream=True):
+        pass
+
+    assert await cupo.store.used(customer, "ai_tokens", _month()) == 20
+
+
+async def test_include_usage_is_requested_automatically(cupo, customer):
+    """Without stream_options the provider omits usage and there is nothing to meter."""
+    inner = FakeOpenAICompatible([FakeChunk(None, usage=FakeOpenAIUsage(1, 1))])
+    client = metered(inner, cupo, customer_id=customer)
+
+    async for _ in await client.chat.completions.create(model="m", messages=[], stream=True):
+        pass
+
+    assert inner.completions.last_kwargs["stream_options"] == {"include_usage": True}
+
+
+async def test_plan_is_needed_for_non_monthly_windows(cupo, customer):
+    """Metering without the plan writes into the wrong window.
+
+    Counters are keyed by window start. A feature declared `window: day`
+    metered without naming the plan lands in the monthly row instead: the write
+    succeeds, nothing raises, and the daily counter reads zero. That silent
+    disagreement between what was written and what is read is worse than an
+    error, so both directions are pinned here.
+    """
+    from datetime import datetime, timezone
+    from cupo.windows import window_start
+
+    day = window_start("day", datetime.now(timezone.utc))
+
+    # Without plan: lands in the monthly row, invisible to the daily limit.
+    unaware = metered(FakeAnthropic(10, 10), cupo, customer_id=customer)
+    await unaware.messages.create(model="m", messages=[])
+    assert await cupo.store.used(customer, "ai_tokens", day) == 0
+    assert await cupo.store.used(customer, "ai_tokens", _month()) == 20
+
+    # With plan: lands where usage() and check() will look for it.
+    aware = metered(
+        FakeAnthropic(10, 10), cupo, customer_id=customer, plan="daily_tokens"
+    )
+    await aware.messages.create(model="m", messages=[])
+    assert await cupo.store.used(customer, "ai_tokens", day) == 20
+
+    report = await cupo.usage(customer, "daily_tokens")
+    assert report["ai_tokens"].used == 20
+
+
+async def test_final_chunk_has_no_choices(cupo, customer):
+    """Consumers must be able to iterate without guarding every chunk.
+
+    The usage-bearing chunk has an empty `choices` list on real providers.
+    Metering must still work, and iteration must not raise.
+    """
+    chunks = [
+        FakeChunk("token"),
+        FakeChunk(None, x_groq={"usage": {"prompt_tokens": 9, "completion_tokens": 11}}),
+    ]
+    client = metered(FakeOpenAICompatible(chunks), cupo, customer_id=customer)
+
+    seen = []
+    async for chunk in await client.chat.completions.create(
+        model="m", messages=[], stream=True
+    ):
+        if chunk.choices:
+            seen.append(chunk.choices[0].delta.content)
+
+    assert seen == ["token"]
+    assert await cupo.store.used(customer, "ai_tokens", _month()) == 20
